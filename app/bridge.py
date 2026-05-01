@@ -505,7 +505,7 @@ class Bridge:
         uptime = int(time.monotonic() - bridge._started_at)
         result: dict = {
             "status": "ok",
-            "version": "v1.4.1",
+            "version": "v1.4.2",
             "uptime_seconds": uptime,
             "started_at": bridge._started_at_iso,
             "letta_reachable": False,
@@ -1035,9 +1035,12 @@ class Bridge:
         matrix_user_id: str,
     ) -> str:
         """
-        v1.4.0b: проверить контекст агента и сделать auto-compact если ≥60k.
+        v1.4.0b: auto-compact при ≥60k токенов с тихим уведомлением.
+        v1.4.2: orphan-detect — если у агента не привязан shared block, делаем
+        silent compact (без уведомления). Реальный кейс: legacy-агенты созданы
+        до v1.4.0 и имеют per-agent шаблонный human-блок.
+
         Возвращает agent_id (старый или новый если был compact).
-        Если compact выполнен — отправит тихое сообщение в комнату.
         """
         # Cooldown — не чаще раза в минуту на одну комнату
         now = time.monotonic()
@@ -1046,10 +1049,74 @@ class Bridge:
             return agent_id
 
         try:
-            r = await self.letta.client.get(f"/v1/agents/{agent_id}/context")
-            if r.status_code >= 400:
+            # 1. Получаем данные агента и shared block_id ожидаемый для юзера
+            r_agent = await self.letta.client.get(f"/v1/agents/{agent_id}")
+            if r_agent.status_code >= 400:
                 return agent_id
-            ctx = r.json()
+            agent_data = r_agent.json()
+
+            # human-блок этого агента
+            agent_human_block = None
+            for b in (agent_data.get("memory") or {}).get("blocks") or []:
+                if b.get("label") == "human":
+                    agent_human_block = b
+                    break
+
+            shared_block_id = await self._resolve_human_block(matrix_user_id)
+            agent_human_id = agent_human_block.get("id") if agent_human_block else None
+
+            # 2. v1.4.2: orphan detection — agent не привязан к shared
+            is_orphan = (
+                shared_block_id
+                and agent_human_id
+                and shared_block_id != agent_human_id
+            )
+
+            if is_orphan:
+                # Silent compact — пересоздаём агента с правильным shared блоком
+                self.log.info(
+                    "[%s] orphan detected: agent_human=%s shared=%s — silent compact",
+                    room_id[:12], agent_human_id, shared_block_id,
+                )
+
+                # Сливаем ценные факты из per-agent блока в shared (если не шаблон)
+                try:
+                    old_value = (agent_human_block.get("value") or "").strip()
+                    is_template = (
+                        not old_value
+                        or old_value.startswith("Здесь записываю важные факты")
+                    )
+                    if not is_template:
+                        # Читаем shared
+                        rb = await self.letta.client.get(f"/v1/blocks/{shared_block_id}")
+                        if rb.status_code < 400:
+                            curr = rb.json().get("value", "")
+                            if old_value not in curr:
+                                merged = (curr + "\n" + old_value).strip()
+                                await self.letta.client.patch(
+                                    f"/v1/blocks/{shared_block_id}",
+                                    json={"value": merged},
+                                )
+                                self.log.info(
+                                    "[%s] orphan: merged %d chars into shared block",
+                                    room_id[:12], len(old_value),
+                                )
+                except Exception as e:
+                    self.log.warning(
+                        "[%s] orphan: merge facts failed: %s", room_id[:12], e,
+                    )
+
+                self._last_compact_at[room_id] = now
+                new_agent_id = await self._compact_agent(
+                    room_id, room_name, matrix_user_id, reason="orphan",
+                )
+                return new_agent_id or agent_id
+
+            # 3. Обычная проверка контекста на 60k
+            r_ctx = await self.letta.client.get(f"/v1/agents/{agent_id}/context")
+            if r_ctx.status_code >= 400:
+                return agent_id
+            ctx = r_ctx.json()
             current = ctx.get("context_window_size_current", 0)
             if current < self._COMPACT_THRESHOLD:
                 return agent_id
