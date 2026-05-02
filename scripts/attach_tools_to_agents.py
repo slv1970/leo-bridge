@@ -21,7 +21,7 @@ def main() -> None:
     # 1. Все calendar tools
     r = httpx.get(f"{LETTA_URL}/v1/tools/", headers=headers, timeout=30)
     r.raise_for_status()
-    cal_tools = [t for t in r.json() if t["name"].startswith("calendar_") or t["name"] in ("internet_search", "leo_create_file") or t["name"].startswith("kb_")]
+    cal_tools = [t for t in r.json() if t["name"].startswith("calendar_") or t["name"] in ("internet_search", "leo_create_file") or t["name"].startswith("kb_") or t["name"].startswith("respect_")]
     if not cal_tools:
         print("Нет calendar_* tools. Запустите сначала register_tools.py")
         sys.exit(1)

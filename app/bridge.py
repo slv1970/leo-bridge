@@ -508,7 +508,7 @@ class Bridge:
         uptime = int(time.monotonic() - bridge._started_at)
         result: dict = {
             "status": "ok",
-            "version": "v1.5.0",
+            "version": "v1.6.0",
             "uptime_seconds": uptime,
             "started_at": bridge._started_at_iso,
             "letta_reachable": False,

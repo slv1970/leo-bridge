@@ -28,6 +28,10 @@ from pydantic import BaseModel, Field
 
 from app.calendar_client import CalendarClient
 from app.timezone_resolver import TimezoneResolver
+# v1.6.0: интеграция с КБ Респект.Чата
+from app.respect_db import RespectDBClient
+from app.respect_kb_search import respect_kb_search as _respect_kb_search_impl
+
 
 
 log = logging.getLogger("internal_api")
@@ -134,6 +138,7 @@ class State:
     pg_pool: asyncpg.Pool | None = None
     tz_resolver: TimezoneResolver | None = None
     matrix_send: Any = None  # callback из bridge для отправки в комнату
+    respect_client: RespectDBClient | None = None  # v1.6.0: КБ Респект.Чата
 
 state = State()
 
@@ -156,10 +161,28 @@ async def lifespan(app: FastAPI):
         matrix_token=os.environ["BRIDGE_ACCESS_TOKEN"],
     )
     await state.tz_resolver.__aenter__()
+    # v1.6.0: КБ Респект.Чата (опционально — если RESPECT_DATABASE_URL задан)
+    if os.environ.get("RESPECT_DATABASE_URL"):
+        try:
+            state.respect_client = RespectDBClient.from_env()
+            await state.respect_client.__aenter__()
+            log.info("Respect.Chat KB client initialized")
+        except Exception as e:
+            log.warning("Respect.Chat KB client init failed: %s", e)
+            state.respect_client = None
+    else:
+        log.info("RESPECT_DATABASE_URL not set, /respect_kb/search disabled")
+
     log.info("Internal API started")
     yield
     if state.tz_resolver:
         await state.tz_resolver.__aexit__(None, None, None)
+    if state.respect_client:
+        try:
+            await state.respect_client.__aexit__(None, None, None)
+        except Exception:
+            pass
+
     if state.pg_pool:
         await state.pg_pool.close()
     log.info("Internal API stopped")
@@ -838,6 +861,40 @@ async def create_file(req: CreateFileReq, _: None = Depends(check_auth)) -> dict
             except Exception:
                 pass
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# =============================================================================
+# v1.6.0: КБ Респект.Чата
+# =============================================================================
+class RespectKbSearchReq(BaseModel):
+    query: str = Field(..., description="Текст поискового запроса")
+    matrix_user_id: str = Field(..., description="MXID пользователя для проверки прав")
+    limit: int = Field(5, ge=1, le=20)
+
+
+@app.post("/respect_kb/search")
+async def respect_kb_search_endpoint(
+    req: RespectKbSearchReq, _: None = Depends(check_auth)
+) -> dict[str, Any]:
+    """v1.6.0: поиск в КБ Респект.Чата с учётом прав пользователя.
+
+    ACL применяется на стороне Респект.Чата через PG-функцию
+    kb_get_accessible_content_ids(matrix_user_id).
+    FTS-поиск делается локально по синхронизированной копии (ai.respect_kb).
+    """
+    if state.respect_client is None or state.pg_pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Respect.Chat KB integration is not configured (RESPECT_DATABASE_URL missing)",
+        )
+    return await _respect_kb_search_impl(
+        leo_pool=state.pg_pool,
+        respect_client=state.respect_client,
+        query=req.query,
+        matrix_user_id=req.matrix_user_id,
+        limit=req.limit,
+    )
 
 
 def serve() -> None:

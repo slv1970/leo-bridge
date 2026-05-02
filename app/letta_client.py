@@ -161,14 +161,16 @@ class LettaClient:
 
     @classmethod
     def _is_our_tool(cls, tool_name: str) -> bool:
-        """v0.8.10: tool считается «нашим» если:
+        """v0.8.10 / v1.6.0: tool считается «нашим» если:
         - имя начинается с calendar_  (календарные tools)
         - имя начинается с kb_  (KB tools: search_corporate/personal, list/info/delete_personal)
+        - имя начинается с respect_  (v1.6.0: КБ Респект.Чата)
         - явно перечислено в _OUR_TOOL_NAMES (internet_search и др.)
         """
         return (
             tool_name.startswith("calendar_")
             or tool_name.startswith("kb_")
+            or tool_name.startswith("respect_")
             or tool_name in cls._OUR_TOOL_NAMES
         )
 
